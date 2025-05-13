@@ -1,0 +1,7 @@
+{
+  "braveApiKey": "YOUR_API_KEY_HERE",
+  "rateLimit": {
+    "perSecond": 1,
+    "perMonth": 15000
+  }
+}

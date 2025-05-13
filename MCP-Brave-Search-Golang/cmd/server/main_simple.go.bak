@@ -1,0 +1,458 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/modelcontextprotocol/brave-search-mcp/internal/ratelimit"
+	"github.com/modelcontextprotocol/brave-search-mcp/pkg/brave"
+	"github.com/modelcontextprotocol/brave-search-mcp/pkg/config"
+)
+
+// Simple JSON RPC message structure
+type JSONRPCMessage struct {
+	JsonRPC string          `json:"jsonrpc"`
+	ID      string          `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *ErrorMessage   `json:"error,omitempty"`
+}
+
+// Error message structure
+type ErrorMessage struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// Initialize params structure
+type InitializeParams struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	ClientInfo      ClientInfo      `json:"clientInfo"`
+	Capabilities    json.RawMessage `json:"capabilities"`
+}
+
+// Client info structure
+type ClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// Simple server structure
+type SimpleServer struct {
+	apiKey      string
+	rateLimiter *ratelimit.RateLimiter
+	initialized bool
+}
+
+func main() {
+	// Load configuration
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create rate limiter
+	rateLimiter := ratelimit.NewRateLimiter(ratelimit.RateLimits{
+		PerSecond: cfg.RateLimit.PerSecond,
+		PerMonth:  cfg.RateLimit.PerMonth,
+	})
+
+	// Create server
+	server := &SimpleServer{
+		apiKey:      cfg.BraveAPIKey,
+		rateLimiter: rateLimiter,
+		initialized: false,
+	}
+
+	// Start server
+	fmt.Fprintf(os.Stderr, "Brave Search MCP Server starting (simple mode)...\n")
+	server.Run()
+}
+
+// Run the server
+func (s *SimpleServer) Run() {
+	scanner := bufio.NewScanner(os.Stdin)
+	writer := bufio.NewWriter(os.Stdout)
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Skip empty lines
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		
+		fmt.Fprintf(os.Stderr, "Received message: %s\n", line)
+		
+		// Parse the message
+		var message JSONRPCMessage
+		if err := json.Unmarshal([]byte(line), &message); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing message: %v\n", err)
+			continue
+		}
+		
+		// Handle the message based on the method
+		var responseMessage *JSONRPCMessage
+		
+		switch message.Method {
+		case "initialize":
+			responseMessage = s.handleInitialize(message)
+		case "initialized":
+			s.initialized = true
+			// No response for notification
+			continue
+		case "tools/list":
+			if !s.initialized {
+				responseMessage = &JSONRPCMessage{
+					JsonRPC: "2.0",
+					ID:      message.ID,
+					Error: &ErrorMessage{
+						Code:    -32002,
+						Message: "Server not initialized",
+					},
+				}
+			} else {
+				responseMessage = s.handleToolsList(message)
+			}
+		case "tools/call":
+			if !s.initialized {
+				responseMessage = &JSONRPCMessage{
+					JsonRPC: "2.0",
+					ID:      message.ID,
+					Error: &ErrorMessage{
+						Code:    -32002,
+						Message: "Server not initialized",
+					},
+				}
+			} else {
+				responseMessage = s.handleToolsCall(message)
+			}
+		default:
+			responseMessage = &JSONRPCMessage{
+				JsonRPC: "2.0",
+				ID:      message.ID,
+				Error: &ErrorMessage{
+					Code:    -32601,
+					Message: "Method not supported: " + message.Method,
+				},
+			}
+		}
+		
+		// Send the response
+		if responseMessage != nil {
+			responseBytes, err := json.Marshal(responseMessage)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error marshaling response: %v\n", err)
+				continue
+			}
+			
+			fmt.Fprintf(os.Stderr, "Sending response: %s\n", string(responseBytes))
+			writer.WriteString(string(responseBytes) + "\n")
+			writer.Flush()
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+	}
+}
+
+// Handle initialize method
+func (s *SimpleServer) handleInitialize(message JSONRPCMessage) *JSONRPCMessage {
+	var params InitializeParams
+	if err := json.Unmarshal(message.Params, &params); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing initialize params: %v\n", err)
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32700,
+				Message: "Parse error",
+			},
+		}
+	}
+	
+	fmt.Fprintf(os.Stderr, "Initialize request from %s %s\n", params.ClientInfo.Name, params.ClientInfo.Version)
+	
+	// Create server info
+	serverInfo := map[string]interface{}{
+		"name":    "brave-search-mcp",
+		"version": "0.1.0",
+	}
+	
+	// Create capabilities
+	capabilities := map[string]interface{}{
+		"tools": map[string]interface{}{
+			"list": true,
+			"call": true,
+		},
+	}
+	
+	// Create result
+	result := map[string]interface{}{
+		"protocolVersion": params.ProtocolVersion,
+		"serverInfo":      serverInfo,
+		"capabilities":    capabilities,
+	}
+	
+	resultBytes, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling result: %v\n", err)
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32603,
+				Message: "Internal error",
+			},
+		}
+	}
+	
+	s.initialized = true
+	return &JSONRPCMessage{
+		JsonRPC: "2.0",
+		ID:      message.ID,
+		Result:  resultBytes,
+	}
+}
+
+// Handle tools/list method
+func (s *SimpleServer) handleToolsList(message JSONRPCMessage) *JSONRPCMessage {
+	// Create web search tool
+	webSearchTool := map[string]interface{}{
+		"name":        brave.WebSearchTool["name"],
+		"description": brave.WebSearchTool["description"],
+		"inputSchema": brave.WebSearchTool["inputSchema"],
+	}
+	
+	// Create local search tool
+	localSearchTool := map[string]interface{}{
+		"name":        brave.LocalSearchTool["name"],
+		"description": brave.LocalSearchTool["description"],
+		"inputSchema": brave.LocalSearchTool["inputSchema"],
+	}
+	
+	// Create tools list
+	toolsList := map[string]interface{}{
+		"tools": []interface{}{
+			webSearchTool,
+			localSearchTool,
+		},
+	}
+	
+	resultBytes, err := json.Marshal(toolsList)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling tools list: %v\n", err)
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32603,
+				Message: "Internal error",
+			},
+		}
+	}
+	
+	return &JSONRPCMessage{
+		JsonRPC: "2.0",
+		ID:      message.ID,
+		Result:  resultBytes,
+	}
+}
+
+// Handle tools/call method
+func (s *SimpleServer) handleToolsCall(message JSONRPCMessage) *JSONRPCMessage {
+	var params map[string]interface{}
+	if err := json.Unmarshal(message.Params, &params); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing tools/call params: %v\n", err)
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32700,
+				Message: "Parse error",
+			},
+		}
+	}
+	
+	toolName, ok := params["name"].(string)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Missing tool name\n")
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32602,
+				Message: "Invalid params: missing tool name",
+			},
+		}
+	}
+	
+	toolArgsRaw, ok := params["arguments"]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Missing tool arguments\n")
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32602,
+				Message: "Invalid params: missing tool arguments",
+			},
+		}
+	}
+	
+	// Marshal arguments to JSON
+	toolArgsBytes, err := json.Marshal(toolArgsRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling tool arguments: %v\n", err)
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32603,
+				Message: "Internal error",
+			},
+		}
+	}
+	
+	fmt.Fprintf(os.Stderr, "Tool call: %s with args: %s\n", toolName, string(toolArgsBytes))
+	
+	var response map[string]interface{}
+	
+	switch toolName {
+	case "brave_web_search":
+		// Parse arguments
+		var args struct {
+			Query  string `json:"query"`
+			Count  int    `json:"count"`
+			Offset int    `json:"offset"`
+		}
+		if err := json.Unmarshal(toolArgsBytes, &args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing web search args: %v\n", err)
+			return &JSONRPCMessage{
+				JsonRPC: "2.0",
+				ID:      message.ID,
+				Error: &ErrorMessage{
+					Code:    -32602,
+					Message: "Invalid params: " + err.Error(),
+				},
+			}
+		}
+		
+		// Set defaults
+		if args.Count <= 0 {
+			args.Count = 10
+		}
+		
+		// Call web search
+		results, err := brave.WebSearch(s.apiKey, args.Query, args.Count, args.Offset, s.rateLimiter)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Web search error: %v\n", err)
+			response = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": "Error: " + err.Error(),
+					},
+				},
+				"isError": true,
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Web search success\n")
+			response = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": results,
+					},
+				},
+				"isError": false,
+			}
+		}
+		
+	case "brave_local_search":
+		// Parse arguments
+		var args struct {
+			Query string `json:"query"`
+			Count int    `json:"count"`
+		}
+		if err := json.Unmarshal(toolArgsBytes, &args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing local search args: %v\n", err)
+			return &JSONRPCMessage{
+				JsonRPC: "2.0",
+				ID:      message.ID,
+				Error: &ErrorMessage{
+					Code:    -32602,
+					Message: "Invalid params: " + err.Error(),
+				},
+			}
+		}
+		
+		// Set defaults
+		if args.Count <= 0 {
+			args.Count = 5
+		}
+		
+		// Call local search
+		results, err := brave.LocalSearch(s.apiKey, args.Query, args.Count, s.rateLimiter)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Local search error: %v\n", err)
+			response = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": "Error: " + err.Error(),
+					},
+				},
+				"isError": true,
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Local search success\n")
+			response = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": results,
+					},
+				},
+				"isError": false,
+			}
+		}
+		
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown tool: %s\n", toolName)
+		response = map[string]interface{}{
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": "Unknown tool: " + toolName,
+				},
+			},
+			"isError": true,
+		}
+	}
+	
+	resultBytes, err := json.Marshal(response)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling call response: %v\n", err)
+		return &JSONRPCMessage{
+			JsonRPC: "2.0",
+			ID:      message.ID,
+			Error: &ErrorMessage{
+				Code:    -32603,
+				Message: "Internal error",
+			},
+		}
+	}
+	
+	return &JSONRPCMessage{
+		JsonRPC: "2.0",
+		ID:      message.ID,
+		Result:  resultBytes,
+	}
+}
