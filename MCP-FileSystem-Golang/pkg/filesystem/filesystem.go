@@ -74,10 +74,15 @@ func (fm *FileManager) ValidatePath(requestedPath string) (string, error) {
 		return "", err
 	}
 
-	// Get absolute path
-	absolute := requestedPath
+	// Get absolute path - FIX: Properly handle relative paths
+	var absolute string
 	if !filepath.IsAbs(expandedPath) {
-		absolute = filepath.Join(filepath.Clean(expandedPath))
+		// For relative paths, convert to absolute using current working directory
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to get current working directory: %w", err)
+		}
+		absolute = filepath.Join(cwd, filepath.Clean(expandedPath))
 	} else {
 		absolute = filepath.Clean(expandedPath)
 	}
