@@ -1,11 +1,59 @@
 package mcp
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// RequestID can be either a string or number as per JSON-RPC spec
+type RequestID struct {
+	value interface{}
+}
+
+// UnmarshalJSON implements custom unmarshaling for RequestID
+func (r *RequestID) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as a number first
+	var num float64
+	if err := json.Unmarshal(data, &num); err == nil {
+		r.value = num
+		return nil
+	}
+	
+	// Try to unmarshal as a string
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		r.value = str
+		return nil
+	}
+	
+	return nil // ID can be omitted in notifications
+}
+
+// MarshalJSON implements custom marshaling for RequestID
+func (r RequestID) MarshalJSON() ([]byte, error) {
+	if r.value == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(r.value)
+}
+
+// String returns the string representation of the ID
+func (r RequestID) String() string {
+	if r.value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", r.value)
+}
+
+// IsEmpty returns true if the ID is empty/nil
+func (r RequestID) IsEmpty() bool {
+	return r.value == nil
+}
 
 // RequestMessage represents a request message from the client
 type RequestMessage struct {
 	JsonRPC string          `json:"jsonrpc"`
-	ID      string          `json:"id"`
+	ID      RequestID       `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
 }
@@ -13,7 +61,7 @@ type RequestMessage struct {
 // ResponseMessage represents a response message sent to the client
 type ResponseMessage struct {
 	JsonRPC string          `json:"jsonrpc"`
-	ID      string          `json:"id"`
+	ID      RequestID       `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *ErrorResponse  `json:"error,omitempty"`
 }

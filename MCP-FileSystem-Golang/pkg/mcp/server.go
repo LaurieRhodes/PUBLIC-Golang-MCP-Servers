@@ -64,7 +64,7 @@ func (s *Server) handleRequest(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to unmarshal request: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Handling method: %s, ID: %s\n", request.Method, request.ID)
+	fmt.Fprintf(os.Stderr, "Handling method: %s, ID: %s\n", request.Method, request.ID.String())
 
 	// Check if this is the initialize method
 	if request.Method == "initialize" {
@@ -72,12 +72,19 @@ func (s *Server) handleRequest(data []byte) ([]byte, error) {
 		return s.handleInitialize(request)
 	}
 
-	// Handle the initialized notification
-	if request.Method == "initialized" {
+	// Handle the initialized notification - UPDATED THIS SECTION
+	if request.Method == "notifications/initialized" {
 		fmt.Fprintf(os.Stderr, "Received initialized notification, setting server as ready\n")
 		s.initialized = true
-		// This is a notification, no response needed
-		return []byte{}, nil
+		// This is a notification, no response needed - return empty array to signal no response
+		return nil, nil
+	}
+
+	// Handle initialized without the notifications/ prefix (just in case)
+	if request.Method == "initialized" {
+		fmt.Fprintf(os.Stderr, "Received initialized notification (legacy format), setting server as ready\n")
+		s.initialized = true
+		return nil, nil
 	}
 
 	// If not initialized and not a ping, reject the request
