@@ -81,6 +81,8 @@ If the `config.json` file doesn't exist, a default one will be created with the 
 
 ### Building from Source
 
+#### Standard Build (Windows/macOS)
+
 ```bash
 # Clone the repository
 git clone https://github.com/LaurieRhodes/PUBLIC-Golang-MCP-Servers.git
@@ -93,15 +95,50 @@ go build -o filesystem-mcp ./cmd/server
 ./filesystem-mcp
 ```
 
+#### Static Build for Linux (Recommended)
+
+On Linux systems, it's recommended to build with static linking to avoid shared library dependency issues (e.g., `libgo.so.23` errors):
+
+```bash
+# Clone the repository
+git clone https://github.com/LaurieRhodes/PUBLIC-Golang-MCP-Servers.git
+cd PUBLIC-Golang-MCP-Servers/MCP-FileSystem-Golang
+
+# Build with static linking (no external dependencies)
+CGO_ENABLED=0 go build -o filesystem-mcp -ldflags="-s -w" ./cmd/server
+
+# Verify static linking (should show "not a dynamic executable")
+ldd filesystem-mcp
+
+# Make executable and run
+chmod +x filesystem-mcp
+./filesystem-mcp
+```
+
+**Why static linking?** When you compile Go programs on Linux with dynamic linking, they depend on specific versions of shared libraries (like `libgo.so.23`). Static linking produces a self-contained binary that runs on any Linux system without requiring these libraries to be installed.
+
 ### MCP Client Configuration
 
 In your MCP client configuration, set up the filesystem server like this:
 
+#### Windows Example
 ```json
 {
   "servers": {
     "filesystem": {
       "command": "C:\\path\\to\\filesystem-mcp.exe",
+      "args": []
+    }
+  }
+}
+```
+
+#### Linux Example
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "/home/username/path/to/filesystem-mcp",
       "args": []
     }
   }
