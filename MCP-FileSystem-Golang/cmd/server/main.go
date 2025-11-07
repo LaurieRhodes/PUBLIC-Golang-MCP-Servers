@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/LaurieRhodes/PUBLIC-Golang-MCP-Servers/MCP-FileSystem-Golang/pkg/config"
+	"github.com/LaurieRhodes/PUBLIC-Golang-MCP-Servers/MCP-FileSystem-Golang/pkg/editor"
 	"github.com/LaurieRhodes/PUBLIC-Golang-MCP-Servers/MCP-FileSystem-Golang/pkg/filesystem"
 	"github.com/LaurieRhodes/PUBLIC-Golang-MCP-Servers/MCP-FileSystem-Golang/pkg/mcp"
 )
@@ -34,11 +36,19 @@ func main() {
 	// Create the file manager with allowed directories from config
 	fileManager := filesystem.NewFileManager(cfg.AllowedDirectories)
 
+	// Create the edit manager for undo functionality
+	backupDir := filepath.Join(os.TempDir(), "mcp-filesystem-backups")
+	editManager, err := editor.NewEditManager(backupDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating edit manager: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create and configure the MCP server
 	server := mcp.NewServer(
 		mcp.ServerInfo{
 			Name:    "secure-filesystem-server",
-			Version: "0.2.0",
+			Version: "0.3.0",
 		},
 		mcp.ServerConfig{
 			Capabilities: mcp.ServerCapabilities{
@@ -51,12 +61,13 @@ func main() {
 	)
 
 	// Set up handlers
-	setupServerHandlers(server, fileManager)
+	setupServerHandlers(server, fileManager, editManager)
 
 	// Start the server with stdio transport
 	transport := mcp.NewStdioTransport()
-	fmt.Fprintf(os.Stderr, "Secure MCP Filesystem Server starting on stdin/stdout\n")
+	fmt.Fprintf(os.Stderr, "Secure MCP Filesystem Server v0.3.0 starting on stdin/stdout\n")
 	fmt.Fprintf(os.Stderr, "Allowed directories: %v\n", cfg.AllowedDirectories)
+	fmt.Fprintf(os.Stderr, "Edit backup directory: %s\n", backupDir)
 	
 	err = server.Connect(transport)
 	if err != nil {
@@ -70,18 +81,34 @@ func main() {
 }
 
 // setupServerHandlers sets up the request handlers for the server
-func setupServerHandlers(server *mcp.Server, fileManager *filesystem.FileManager) {
+func setupServerHandlers(server *mcp.Server, fileManager *filesystem.FileManager, editManager *editor.EditManager) {
 	// Handler for tools/list
 	server.SetRequestHandler("tools/list", func(params json.RawMessage) (json.RawMessage, error) {
-		tools := make([]mcp.Tool, 0, len(filesystem.FilesystemTools))
+		// Combine filesystem and editor tools
+		allTools := make([]mcp.Tool, 0, len(filesystem.FilesystemTools)+len(editor.EditorTools))
 		
+		// Add filesystem tools
 		for _, toolDef := range filesystem.FilesystemTools {
 			inputSchema, err := json.Marshal(toolDef.InputSchema)
 			if err != nil {
 				continue
 			}
 			
-			tools = append(tools, mcp.Tool{
+			allTools = append(allTools, mcp.Tool{
+				Name:        toolDef.Name,
+				Description: toolDef.Description,
+				InputSchema: inputSchema,
+			})
+		}
+		
+		// Add editor tools
+		for _, toolDef := range editor.EditorTools {
+			inputSchema, err := json.Marshal(toolDef.InputSchema)
+			if err != nil {
+				continue
+			}
+			
+			allTools = append(allTools, mcp.Tool{
 				Name:        toolDef.Name,
 				Description: toolDef.Description,
 				InputSchema: inputSchema,
@@ -89,7 +116,7 @@ func setupServerHandlers(server *mcp.Server, fileManager *filesystem.FileManager
 		}
 		
 		response := mcp.ListToolsResponse{
-			Tools: tools,
+			Tools: allTools,
 		}
 		
 		return json.Marshal(response)
@@ -109,7 +136,7 @@ func setupServerHandlers(server *mcp.Server, fileManager *filesystem.FileManager
 		}
 		
 		// Process the tool call
-		return handleToolCall(request, fileManager)
+		return handleToolCall(request, fileManager, editManager)
 	})
 
 	// Handler for call_tool (backward compatibility)
@@ -120,11 +147,12 @@ func setupServerHandlers(server *mcp.Server, fileManager *filesystem.FileManager
 }
 
 // handleToolCall handles a tool call request
-func handleToolCall(request mcp.CallToolRequest, fileManager *filesystem.FileManager) (json.RawMessage, error) {
+func handleToolCall(request mcp.CallToolRequest, fileManager *filesystem.FileManager, editManager *editor.EditManager) (json.RawMessage, error) {
 	var response mcp.CallToolResponse
 	
 	// Process based on tool name
 	switch request.Name {
+	// Filesystem tools
 	case "read_file":
 		path, err := filesystem.ParseReadFileArgs(request.Arguments)
 		if err != nil {
@@ -272,6 +300,76 @@ func handleToolCall(request mcp.CallToolRequest, fileManager *filesystem.FileMan
 		response = mcp.CallToolResponse{
 			Content: []mcp.ContentItem{
 				{Type: "text", Text: fileManager.ListAllowedDirectories()},
+			},
+		}
+	
+	// Editor tools
+	case "str_replace":
+		path, oldStr, newStr, err := editor.ParseStrReplaceArgs(request.Arguments)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		// Validate path first
+		validPath, err := fileManager.ValidatePath(path)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		err = editManager.StrReplace(validPath, oldStr, newStr)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		response = mcp.CallToolResponse{
+			Content: []mcp.ContentItem{
+				{Type: "text", Text: fmt.Sprintf("Successfully replaced text in %s", path)},
+			},
+		}
+	
+	case "insert":
+		path, lineNumber, text, err := editor.ParseInsertArgs(request.Arguments)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		// Validate path first
+		validPath, err := fileManager.ValidatePath(path)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		err = editManager.Insert(validPath, lineNumber, text)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		response = mcp.CallToolResponse{
+			Content: []mcp.ContentItem{
+				{Type: "text", Text: fmt.Sprintf("Successfully inserted text at line %d in %s", lineNumber, path)},
+			},
+		}
+	
+	case "undo_edit":
+		path, err := editor.ParseUndoEditArgs(request.Arguments)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		// Validate path first
+		validPath, err := fileManager.ValidatePath(path)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		err = editManager.UndoEdit(validPath)
+		if err != nil {
+			return createErrorResponse(err.Error())
+		}
+		
+		response = mcp.CallToolResponse{
+			Content: []mcp.ContentItem{
+				{Type: "text", Text: fmt.Sprintf("Successfully undid last edit to %s", path)},
 			},
 		}
 	
